@@ -1,4 +1,3 @@
-
 """
 Echo24.cz web scraper
 """
@@ -74,16 +73,6 @@ class Article:
 def http_get(url: str, *, timeout: int = 15) -> requests.Response:
     resp = requests.get(url, headers={"User-Agent": UA}, timeout=timeout)
     resp.raise_for_status()
-
-    
-    if not resp.encoding or resp.encoding.lower() in ["utf-8", "utf8"]:
-        import chardet
-        detected = chardet.detect(resp.content)
-        if detected and detected["encoding"]:
-            resp.encoding = detected["encoding"]
-        else:
-            resp.encoding = "utf-8"
-
     return resp
 
 
@@ -98,7 +87,7 @@ def url_md5_8(url: str) -> str:
 
 def discover_article_urls() -> List[str]:
     r = http_get(HOMEPAGE)
-    soup = BeautifulSoup(r.text, "lxml")
+    soup = BeautifulSoup(r.content, "lxml")
     urls: Set[str] = set()
     for a in soup.select("a[href]"):
         href = a.get("href") or ""
@@ -128,7 +117,7 @@ def parse_date_iso(dt_str: Optional[str]) -> str:
 
 def extract_article(url: str) -> Optional[Article]:
     r = http_get(url)
-    soup = BeautifulSoup(r.text, "lxml")
+    soup = BeautifulSoup(r.content, "lxml")
 
     # -------- Title --------
     title = (
@@ -177,7 +166,7 @@ def extract_article(url: str) -> Optional[Article]:
             if txt:
                 paragraphs.append(txt)
 
-    full_content = normalize_whitespace("\n".join(paragraphs))
+    full_content = "\n\n".join(paragraphs)
     snippet = full_content[:200] + ("…" if len(full_content) > 200 else "")
 
     # -------- Tags --------
@@ -201,6 +190,7 @@ def extract_article(url: str) -> Optional[Article]:
         full_content=full_content,
         tags=tags,
     )
+
 
 
 def target_path(root: Path, date_iso: str, url: str) -> Path:
@@ -231,6 +221,23 @@ def save_article(root: Path, art: Article) -> Path:
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(art.to_dict(), f, indent=4, ensure_ascii=False)
     return out_path
+
+""" 
+    Varianta s odsazenýma odstavcema:
+    def save_article(root: Path, art: Article) -> Path:
+    out_path = target_path(root, art.date, art.url)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data = art.to_dict()
+
+    json_text = json.dumps(data, indent=4, ensure_ascii=False)
+
+    json_text = json_text.replace("\\n", "\n")
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(json_text)
+
+    return out_path"""
 
 
 def run_once(root: Path, limit: Optional[int] = None) -> Tuple[int, int]:
