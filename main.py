@@ -1,19 +1,6 @@
-#!/usr/bin/env python3
+
 """
 Echo24.cz web scraper
-
-Meets the semester project requirements:
-- Process steps: discover articles on homepage, download them, skip duplicates, save to JSON
-- JSON file name: [source]-[YYYYMMDD]-[hash8].json with MD5(url)
-- JSON UTF-8 structure exactly as in slides
-- Directory layout: ./data/[source]/[year]/[month]/file.json (root folder is CLI param)
-- Designed to run repeatedly (idempotent) and optionally in an hourly loop with --loop
-
-Usage examples:
-  python echo24_scraper.py --root ./data
-  python echo24_scraper.py --root /var/newsdata --loop
-
-Requirements: requests, beautifulsoup4, lxml, python-dateutil
 """
 from __future__ import annotations
 
@@ -34,9 +21,9 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
 try:
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-except Exception:  # very old Python fallback
-    ZoneInfo = None  # type: ignore
-    ZoneInfoNotFoundError = Exception  # type: ignore
+except Exception:  
+    ZoneInfo = None  
+    ZoneInfoNotFoundError = Exception 
 
 SOURCE_NAME = "echo24.cz"
 HOMEPAGE = "https://echo24.cz/"
@@ -45,18 +32,17 @@ UA = (
     "(KHTML, like Gecko) Chrome/127.0 Safari/537.36"
 )
 
-# Robust Prague timezone handling for Windows (no system tzdb)
+
 try:
     if ZoneInfo is None:
         raise ZoneInfoNotFoundError
     PRAGUE_TZ = ZoneInfo("Europe/Prague")
 except Exception:
-    # Try to use the bundled tzdata package if available
+   
     try:
-        import tzdata  # noqa: F401
-        PRAGUE_TZ = ZoneInfo("Europe/Prague")  # type: ignore[arg-type]
+        import tzdata  # 
+        PRAGUE_TZ = ZoneInfo("Europe/Prague")  
     except Exception:
-        # Final fallback to dateutil (no tz transitions but good enough)
         from dateutil import tz as _tz
         PRAGUE_TZ = _tz.gettz("Europe/Prague") or _tz.UTC
 
@@ -65,7 +51,7 @@ except Exception:
 class Article:
     title: str
     url: str
-    date: str  # ISO 8601 with timezone
+    date: str  
     author: str
     source: str
     content_snippet: str
@@ -89,15 +75,14 @@ def http_get(url: str, *, timeout: int = 15) -> requests.Response:
     resp = requests.get(url, headers={"User-Agent": UA}, timeout=timeout)
     resp.raise_for_status()
 
-    # 🔍 autodetekce správného kódování (některé články jsou v Windows-1250)
+    
     if not resp.encoding or resp.encoding.lower() in ["utf-8", "utf8"]:
-        # použij charset z hlaviček nebo z HTML <meta>
         import chardet
         detected = chardet.detect(resp.content)
         if detected and detected["encoding"]:
             resp.encoding = detected["encoding"]
         else:
-            resp.encoding = "utf-8"  # fallback
+            resp.encoding = "utf-8"
 
     return resp
 
@@ -112,10 +97,6 @@ def url_md5_8(url: str) -> str:
 
 
 def discover_article_urls() -> List[str]:
-    """Return a list of candidate article URLs from the homepage.
-
-    Echo24 uses paths with "/a/" for article permalinks. We filter to those.
-    """
     r = http_get(HOMEPAGE)
     soup = BeautifulSoup(r.text, "lxml")
     urls: Set[str] = set()
@@ -127,7 +108,6 @@ def discover_article_urls() -> List[str]:
             continue
         if "echo24.cz" not in href:
             continue
-        # Heuristic: keep canonical article URLs containing '/a/'
         if "/a/" in href:
             urls.add(href.split("#")[0])
     return sorted(urls)
@@ -161,7 +141,6 @@ def extract_article(url: str) -> Optional[Article]:
         title_text = ""
 
     # -------- Date --------
-    # Try multiple options commonly used by Echo24/Czech media
     date_text = None
     meta_time = soup.select_one("meta[property='article:published_time']")
     if meta_time and meta_time.get("content"):
@@ -174,11 +153,9 @@ def extract_article(url: str) -> Optional[Article]:
 
     # -------- Author --------
     author_text = ""
-    # meta name=author
     meta_author = soup.select_one("meta[name='author']")
     if meta_author and meta_author.get("content"):
         author_text = meta_author.get("content").strip()
-    # Common bylines
     if not author_text:
         by = soup.select_one(".author, .Article-author, .byline, [itemprop='author']")
         if by:
@@ -187,7 +164,6 @@ def extract_article(url: str) -> Optional[Article]:
         author_text = "Redakce Echo24"
 
     # -------- Content --------
-    # Try typical article body containers
     body_candidates = soup.select(
         ".article-body, .Article-content, [itemprop='articleBody'], .content, .article__content"
     )
@@ -196,7 +172,6 @@ def extract_article(url: str) -> Optional[Article]:
         ps = [normalize_whitespace(p.get_text(" ", strip=True)) for p in body.select("p") if p.get_text(strip=True)]
         paragraphs.extend(ps)
     if not paragraphs:
-        # Fallback: all <p> inside <article>
         for p in soup.select("article p"):
             txt = normalize_whitespace(p.get_text(" ", strip=True))
             if txt:
@@ -280,7 +255,6 @@ def run_once(root: Path, limit: Optional[int] = None) -> Tuple[int, int]:
             save_article(root, art)
             seen.add(h8)
             saved += 1
-            # be polite
             time.sleep(0.8)
         except requests.HTTPError as e:
             print(f"HTTP error for {url}: {e}", file=sys.stderr)
@@ -307,7 +281,6 @@ def main():
     if args.loop:
         while True:
             cycle()
-            # Sleep until the next full hour boundary to comply with 1x/hour intent
             now = datetime.now(PRAGUE_TZ)
             seconds_to_next_hour = (60 - now.minute - 1) * 60 + (60 - now.second)
             time.sleep(max(60, seconds_to_next_hour))
