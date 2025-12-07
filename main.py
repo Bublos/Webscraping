@@ -20,9 +20,9 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
 try:
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-except Exception:  
-    ZoneInfo = None  
-    ZoneInfoNotFoundError = Exception 
+except Exception:
+    ZoneInfo = None
+    ZoneInfoNotFoundError = Exception
 
 SOURCE_NAME = "echo24.cz"
 HOMEPAGE = "https://echo24.cz/"
@@ -31,16 +31,66 @@ UA = (
     "(KHTML, like Gecko) Chrome/127.0 Safari/537.36"
 )
 
+# --- Preferovaný pořadník parserů pro BeautifulSoup (fallbacky) ---
+PARSER_ORDER = ("lxml", "html5lib", "html.parser")
+
+def make_soup(html: bytes) -> BeautifulSoup:
+    """
+    Vytvoří BeautifulSoup s fallbacky:
+    1) lxml (nejrychlejší), 2) html5lib (tolerantní), 3) html.parser (vestavěný).
+    """
+    last_err = None
+    for parser in PARSER_ORDER:
+        try:
+            return BeautifulSoup(html, parser)
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(
+        "Žádný dostupný HTML parser. Nainstaluj alespoň jeden z: lxml, html5lib "
+        f"(poslední chyba: {last_err})"
+    )
+
+# --- Dodatečné regulární tagy podle obsahu článku ---
+# 1) Politika = statický tag
+# 2) Ekonomika = statický tag
+# 3) E-mail = zachytávací skupina -> do tagů se přidá nalezená e-mailová adresa
+
+# Kompilované regulární výrazy (rychlejší a přehlednější)
+POLITICS_RX = re.compile(
+    r"\b(politika|premiér|prezident|vláda|poslanecká sněmovna|senát|ministr|koalice|opozice|"
+    r"evropská\s+(?:unie|komise)|nato)\b",
+    re.IGNORECASE
+)
+
+ECONOMY_RX = re.compile(
+    r"\b(ekonomika|inflace|hdp|nezaměstnanost|rozpočet|deficit|mzdy|obchod|export|dovoz|"
+    r"investice|kurz|koruna|čnb|úrokové\s+sazby|trh)\b",
+    re.IGNORECASE
+)
+
+# Zachytávací skupina (group 1) vrací nalezenou e-mailovou adresu
+EMAIL_RX = re.compile(
+    r"\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b"
+)
+
+# Seznam (regex, tag_name). Pokud je tag_name None, použije se zachycená skupina (viz extract_article).
+PATTERN_TAGS: List[Tuple[re.Pattern, Optional[str]]] = [
+    (POLITICS_RX, "Politika"),
+    (ECONOMY_RX, "Ekonomika"),
+    (EMAIL_RX, None),  # přidá přímo nalezenou e-mailovou adresu jako tag
+]
+
+
 
 try:
     if ZoneInfo is None:
         raise ZoneInfoNotFoundError
     PRAGUE_TZ = ZoneInfo("Europe/Prague")
 except Exception:
-   
     try:
-        import tzdata  # 
-        PRAGUE_TZ = ZoneInfo("Europe/Prague")  
+        import tzdata  # noqa: F401
+        PRAGUE_TZ = ZoneInfo("Europe/Prague")
     except Exception:
         from dateutil import tz as _tz
         PRAGUE_TZ = _tz.gettz("Europe/Prague") or _tz.UTC
@@ -50,7 +100,7 @@ except Exception:
 class Article:
     title: str
     url: str
-    date: str  
+    date: str
     author: str
     source: str
     content_snippet: str
@@ -76,18 +126,18 @@ def http_get(url: str, *, timeout: int = 15) -> requests.Response:
     return resp
 
 
-
+# Vyčistí nadbytečné bílé znaky
 def normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
-
+# Hash z url a uloží posledních 8 znaků (kvůli duplikaci)
 def url_md5_8(url: str) -> str:
     return hashlib.md5(url.encode("utf-8")).hexdigest()[-8:]
 
 
 def discover_article_urls() -> List[str]:
     r = http_get(HOMEPAGE)
-    soup = BeautifulSoup(r.content, "lxml")
+    soup = make_soup(r.content)
     urls: Set[str] = set()
     for a in soup.select("a[href]"):
         href = a.get("href") or ""
@@ -95,13 +145,14 @@ def discover_article_urls() -> List[str]:
             href = requests.compat.urljoin(HOMEPAGE, href)
         if not href.startswith("http"):
             continue
-        if "echo24.cz" not in href:
+        if "echo24.cz" not in href:  # filtr zda je opravdu ze stránky echo24
             continue
-        if "/a/" in href:
+        if "/a/" in href:  # filtr zda články obsahují "/a/" (pattern)
             urls.add(href.split("#")[0])
-    return sorted(urls)
+    return sorted(urls)  # vrací unikátní URL
 
 
+# Zajištění stejné timezone pro ukládání
 def parse_date_iso(dt_str: Optional[str]) -> str:
     """Parse a date string to ISO 8601 with Prague TZ; fallback to now()."""
     if dt_str:
@@ -117,7 +168,7 @@ def parse_date_iso(dt_str: Optional[str]) -> str:
 
 def extract_article(url: str) -> Optional[Article]:
     r = http_get(url)
-    soup = BeautifulSoup(r.content, "lxml")
+    soup = make_soup(r.content)
 
     # -------- Title --------
     title = (
@@ -180,6 +231,37 @@ def extract_article(url: str) -> Optional[Article]:
         if meta_kw and meta_kw.get("content"):
             tags = [t.strip() for t in meta_kw.get("content").split(",") if t.strip()]
 
+    # --- Doplň chytré tagy podle regexů ---
+    haystack = " \n ".join([
+        url or "",
+        title_text or "",
+        full_content[:2000] or "",   # jen úvod článku kvůli výkonu
+    ])
+
+    # finditer => přidá všechny shody (např. více e-mailů)
+    for rx, tag_name in PATTERN_TAGS:
+        for match in rx.finditer(haystack):
+            if tag_name is None:
+                # Zachytávací skupina => přidáme konkrétní text (group 1)
+                try:
+                    captured = match.group(1)
+                except IndexError:
+                    captured = match.group(0)
+                if captured:
+                    tags.append(captured.lower())
+            else:
+                tags.append(tag_name)
+
+    # Odstraň duplicity case-insensitive, zachovej pořadí a preferuj původní zápis
+    seen_lower = set()
+    deduped: List[str] = []
+    for t in tags:
+        k = t.lower()
+        if k not in seen_lower:
+            seen_lower.add(k)
+            deduped.append(t)
+    tags = deduped
+
     return Article(
         title=title_text,
         url=url,
@@ -190,7 +272,6 @@ def extract_article(url: str) -> Optional[Article]:
         full_content=full_content,
         tags=tags,
     )
-
 
 
 def target_path(root: Path, date_iso: str, url: str) -> Path:
@@ -222,30 +303,29 @@ def save_article(root: Path, art: Article) -> Path:
         json.dump(art.to_dict(), f, indent=4, ensure_ascii=False)
     return out_path
 
-""" 
+"""
     Varianta s odsazenýma odstavcema:
     def save_article(root: Path, art: Article) -> Path:
-    out_path = target_path(root, art.date, art.url)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path = target_path(root, art.date, art.url)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    data = art.to_dict()
+        data = art.to_dict()
+        json_text = json.dumps(data, indent=4, ensure_ascii=False)
+        json_text = json_text.replace("\\n", "\n")
 
-    json_text = json.dumps(data, indent=4, ensure_ascii=False)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(json_text)
 
-    json_text = json_text.replace("\\n", "\n")
-
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(json_text)
-
-    return out_path"""
+        return out_path
+"""
 
 
 def run_once(root: Path, limit: Optional[int] = None) -> Tuple[int, int]:
-    urls = discover_article_urls()
+    urls = discover_article_urls()  # získá kandidátní URL
     if limit:
         urls = urls[:limit]
 
-    seen = existing_hashes(root)
+    seen = existing_hashes(root)  # načte známé hashe
     saved = 0
     skipped = 0
 
@@ -280,7 +360,7 @@ def main():
     root = Path(args.root).resolve()
     print(f"Data root: {root}")
 
-    def cycle():
+    def cycle():  # Zavolá run_once, získá saved/skipped
         saved, skipped = run_once(root, limit=args.limit)
         now = datetime.now(PRAGUE_TZ).isoformat(timespec="seconds")
         print(f"[{now}] saved={saved} skipped={skipped}")
