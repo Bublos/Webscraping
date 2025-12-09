@@ -33,6 +33,7 @@ from urllib.parse import urljoin
 
 DEBUG = True  # při False poběží headless a bude méně výpisů
 
+
 def dprint(msg: str) -> None:
     if DEBUG:
         print(f"[DEBUG] {msg}")
@@ -198,51 +199,66 @@ def save_article(root: Path, art: Article) -> Path:
 # ----------------- Cookie lišta -----------------
 
 
+def click_cookie_button(target, where: str) -> bool:
+    """
+    Zkusí najít a kliknout na tlačítko / element s textem souhlasu cookies
+    v dané stránce nebo framu. Vrací True pokud klikl.
+    """
+    # konkrétní text z Echo24 + obecnější varianty
+    texts = [
+        "Rozumím a přijímám",
+        "Rozumím, přijímám",
+        "Rozumím",
+        "Přijmout vše",
+        "Přijmout cookies",
+        "Souhlasím",
+        "Souhlasím se vším",
+        "Accept all",
+        "I agree",
+    ]
+
+    for txt in texts:
+        # 1) tlačítko s tímto textem
+        selectors = [
+            f"button:has-text('{txt}')",
+            f"text='{txt}'",  # libovolný element s tímto textem
+        ]
+        for sel in selectors:
+            loc = target.locator(sel)
+            try:
+                if loc.count() == 0:
+                    continue
+                if not loc.first.is_visible():
+                    continue
+                dprint(f"Klikám na cookie tlačítko ({where}): {txt} (selector: {sel})")
+                loc.first.click()
+                target.wait_for_timeout(500)
+                return True
+            except Exception:
+                # když tenhle selector failne, zkus další
+                continue
+    return False
+
+
 def handle_cookies(page) -> None:
     """
     Pokusí se odkliknout cookie lištu (na stránce i v iframu).
     Pro debugging uvidíš, jak tlačítko problikne.
     """
-    # typické texty tlačítek – klidně přidáme další, pokud Echo změní wording
-    button_texts = [
-        "Přijmout vše",
-        "Přijmout cookies",
-        "Souhlasím",
-        "Souhlasím se vším",
-        "Akceptovat vše",
-        "Accept all",
-        "I agree",
-    ]
+    # chvilku počkej, ať má CMP šanci se vykreslit
+    page.wait_for_timeout(1000)
 
-    # Nejprve zkus přímo na hlavní stránce
-    for txt in button_texts:
-        locator = page.locator(f"button:has-text('{txt}')")
-        try:
-            if locator.first.is_visible(timeout=2000):
-                dprint(f"Klikám na cookie tlačítko (hlavní stránka): {txt}")
-                locator.first.click()
-                # Chvilku počkej, ať overlay zmizí
-                page.wait_for_timeout(500)
-                return
-        except Exception:
-            continue
+    # 1) hlavní stránka
+    if click_cookie_button(page, "main page"):
+        return
 
-    # Pokud nic, zkus iframy (často CMP běží v iframu)
+    # 2) iframy (CMP často běží v iframu)
     for frame in page.frames:
         if frame is page.main_frame:
             continue
-        for txt in button_texts:
-            locator = frame.locator(f"button:has-text('{txt}')")
-            try:
-                if locator.first.is_visible(timeout=2000):
-                    dprint(f"Klikám na cookie tlačítko (iframe): {txt}")
-                    locator.first.click()
-                    page.wait_for_timeout(500)
-                    return
-            except Exception:
-                continue
+        if click_cookie_button(frame, "iframe"):
+            return
 
-    # Pokud nic nenašel, prostě nech být a pokračuj
     dprint("Cookie tlačítko jsem nenašel – pokračuju bez odkliknutí.")
 
 
@@ -261,7 +277,6 @@ def discover_article_urls(page) -> List[str]:
     except PlaywrightTimeoutError:
         dprint("Timeout při načítání homepage, beru částečný HTML obsah...")
 
-    # odklikni cookie lištu, pokud je
     handle_cookies(page)
 
     html = page.content()
@@ -298,7 +313,6 @@ def extract_article(page, url: str) -> Optional[Article]:
         print(f"[ERROR] Playwright error for {url}: {e}", file=sys.stderr)
         return None
 
-    # cookie lišta může vylézt i na detailu článku (jiný domain/CMP apod.)
     handle_cookies(page)
 
     html = page.content()
